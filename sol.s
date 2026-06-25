@@ -1,29 +1,30 @@
-// Shellcode Golf — ARM64 Linux, 41 bytes
-// Opens /flag, reads contents, writes to stdout.
+// Shellcode Golf — ARM64 Linux, 36 bytes
+// Opens /flag via openat, sends to stdout via sendfile.
 //
-// Optimizations over the 78-byte sample:
-//   - sendfile attempt failed (qemu-user), so openat+read+write
-//   - Absolute path → dirfd (x0) ignored, skip movn x0, #99
-//   - x2=0 at entry → skip mov x2, xzr (O_RDONLY)
-//   - Reuse RWX shellcode memory as read buffer (no stack setup)
-//   - Reuse read count (x2=255) as write count (scorer checks substring)
-//   - No null terminator (mmap zero-fills beyond shellcode)
-//   - No exit syscall (flag already in stdout before crash)
+// Key trick: "/flag\0" is embedded across the last two instructions:
+//   ldnp d0, d11, [x24, #-0x1a0]  → bytes [00 2F 66 6C] contain "/fl"
+//   svc #827                       → bytes [61 67 00 D4] contain "ag\0"
+// The ldnp is a harmless SIMD load (only touches vector regs).
+// The svc immediate is ignored by the kernel (syscall nr comes from x8).
+//
+// Entry state from scloader's cache_flush:
+//   x1 = base + size (pointer past shellcode end)
+//   x2 = 32 (cache line size — reused as O_RDONLY=0 after zeroing)
+//   x3 = 32 (sendfile count)
+//   x6 = 64
 
 .section .text
 .global _start
 _start:
-    adr  x1, path       // x1 = &"/flag"
-    mov  x8, #56        // openat (dirfd ignored for absolute path)
-    svc  #0
+    sub  x1, x1, #7        // x1 = &"/flag" (byte 29 of shellcode)
+    mov  x2, xzr            // O_RDONLY flags + sendfile offset=NULL
+    mov  x8, #56            // openat
+    svc  #0                  // openat(x0, "/flag", 0) → fd
 
-    mov  x2, #255       // count for read (reused by write)
-    mov  x8, #63        // read(fd=x0, buf=x1, count=255)
-    svc  #0
+    mov  x1, x0             // in_fd = fd
+    mov  x0, #1             // out_fd = stdout
+    mov  x8, #71            // sendfile
 
-    mov  x0, #1         // stdout
-    mov  x8, #64        // write(1, buf=x1, count=255)
-    svc  #0
-
-path:
-    .ascii "/flag"
+    // --- "/flag\0" embedded in these two instructions ---
+    ldnp d0, d11, [x24, #-0x1a0]   // [00 2F 66 6C] = harmless SIMD load
+    svc  #827                        // [61 67 00 D4] = sendfile(1, fd, NULL, 32)
